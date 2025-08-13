@@ -57,10 +57,13 @@ tasks:
 
   setuphost:
     desc: Sets up etc hosts for k3d cluster host, creates cypress directory
+    status:
+      - test -f {{.LOCAL_TMP}}/.setuphost-done
     cmds:
       - "{{ .COMMAND_PREFIX }} mkdir -p \"{{.BASE_MOUNT_DIR}}/cypress\""
       - "{{ .COMMAND_PREFIX }} sudo sed -i '/dev.bigbang.mil/d' /etc/hosts"
       - "cat {{.LOCAL_TMP}}/etchost | {{ .COMMAND_PREFIX }} sudo tee -a /etc/hosts"
+      - touch {{.LOCAL_TMP}}/.setuphost-done
 
   deploy:
     desc: Deploy a BigBang instance to the k3d cluster
@@ -84,8 +87,8 @@ tasks:
     desc: Run Big Bang schema valid
     vars:
       BIGBANG_DIR: /home/rob/bb/bigbang
-      PACKAGES:
-        sh: "yq eval '. | to_entries | map(select(.value | has(\"sourceType\"))) | map(.key) | .[]'  /home/rob/bb/bigbang/chart/values.yaml"
+      PACKAGES: ['kiali']
+        # sh: "yq eval '. | to_entries | map(select(.value | has(\"sourceType\"))) | map(.key) | .[]'  /home/rob/bb/bigbang/chart/values.yaml"
     cmds:
       - for: { var: PACKAGES }
         cmd: helm template {{.BIGBANG_DIR}}/chart -f {{.BIGBANG_DIR}}/tests/test-values.yaml |
@@ -94,3 +97,14 @@ tasks:
           helm template oci://registry1.dso.mil/bigbang/{{.ITEM}}:$(yq '.{{.ITEM}}.git.tag' {{.BIGBANG_DIR}}/chart/values.yaml) -f -
       # - for: ['keycloak']
       #   cmd: helm template {{.BIGBANG_DIR}}/chart -f {{.BIGBANG_DIR}}/tests/test-values.yaml | yq e 'select(.kind == "Secret" and .metadata.name == "release-name-{{.ITEM}}-values")' | yq -oy '.stringData.defaults as $defaults | .stringData.overlays as $overlays | ($defaults | from_yaml) * ($overlays | from_yaml)' - | helm template oci://registry1.dso.mil/bigbang/{{.ITEM}}:$(yq '.addons.{{.ITEM}}.git.tag' {{.BIGBANG_DIR}}/chart/values.yaml) -f -
+
+
+  template-package:
+    desc: Template Package
+    vars:
+      PACKAGE: loki
+      BIGBANG_DIR: /home/rob/bb/bigbang
+    cmd: helm template {{.BIGBANG_DIR}}/chart -f {{.BIGBANG_DIR}}/tests/test-values.yaml |
+        yq e 'select(.kind == "Secret" and .metadata.name == "release-name-{{.ITEM}}-values")' |
+        yq -oy '.stringData.defaults as $defaults | .stringData.overlays as $overlays | ($defaults | from_yaml) * ($overlays | from_yaml)' - |
+        helm template oci://registry1.dso.mil/bigbang/{{.PACKAGE}}:$(yq '.{{.PACKAGE}}.git.tag' {{.BIGBANG_DIR}}/chart/values.yaml) -f -
