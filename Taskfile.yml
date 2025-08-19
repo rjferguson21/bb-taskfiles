@@ -44,6 +44,7 @@ tasks:
 
   k3d:create:
     desc: Create a k3d cluster for testing with flux and MetalLB
+    dir: '{{.USER_WORKING_DIR}}'
     vars:
       TEMPLATE_VARS: --set=k3d.serverIP="0.0.0.0" --set=k3d.volumeBaseDir="{{.BASE_MOUNT_DIR}}" --set=registry1.username=$REGISTRY1_USERNAME --set=registry1.password=$REGISTRY1_PASSWORD
     cmds:
@@ -67,9 +68,11 @@ tasks:
 
   deploy:
     desc: Deploy a BigBang instance to the k3d cluster
+    dir: '{{.USER_WORKING_DIR}}'
     cmds:
       - helm upgrade --install bigbang {{.BIGBANG_DIR}}/chart
         --namespace=bigbang --create-namespace --values {{.BIGBANG_DIR}}/tests/test-values.yaml
+        --values {{.BIGBANG_DIR}}/tests/disable-core-values.yaml
         --values {{.BIGBANG_DIR}}/chart/ingress-certs.yaml
         --values {{.LOCAL_TMP}}/dev-values.yaml
         --set=registryCredentials.username=$REGISTRY1_USERNAME

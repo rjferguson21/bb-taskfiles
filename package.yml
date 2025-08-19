@@ -3,28 +3,34 @@ version: '3'
 
 vars:
   BIGBANG_DIR: /home/rob/bb/bigbang
-  TASKFILE_DIR: /home/rob/bb/taskfiles
-  BIGBANG_K3D_CHART: oci://ghcr.io/rjferguson21/helm/bb-k3d:0.1.3
-  TEST_VALUES: tests/test-values.yaml
+  PACKAGE: kiali
+  RELEASE_NAME: kiali-kiali
+  PACKAGE_PATH:
+    sh: 'yq e ".. | (select(has(\"git\")) or (select(has(\"helmRepo\")))) | (path | join(\".\")) | select(. == \"*{{.PACKAGE}}\")" /home/rob/bb/bigbang/chart/values.yaml'
+  BASE_MOUNT_DIR: "{{.USER_WORKING_DIR}}/dev"
 
 includes:
   dev:
-    taskfile: "{{.TASKFILE_DIR}}/Taskfile.yml"
+    taskfile: "./Taskfile.yml"
 
 tasks:
+  foo:
+    cmds:
+      - echo {{.BASE_MOUNT_DIR}}
   default:
       - task: dev:k3d:create
       - task: deploy
       - task: test
   deploy:
+    dir: '{{.USER_WORKING_DIR}}'
     vars:
       BIGBANG_DIR: /home/rob/bb/bigbang
     cmds:
       - task: dev:deploy
         vars:
           BIGBANG_DIR: "{{.BIGBANG_DIR}}"
-          EXTRA_ARGS: -f tests/test-values.yaml --set=.git.branch=$(git rev-parse --abbrev-ref HEAD) --set=.git.tag=null
-    
+          EXTRA_ARGS: -f tests/test-values.yaml --set={{.PACKAGE_PATH}}.git.branch=$(git rev-parse --abbrev-ref HEAD) --set={{.PACKAGE_PATH}}.git.tag=null
+
   upgrade:
     vars:
       BIGBANG_DIR: /home/rob/bb/bigbang
@@ -37,20 +43,19 @@ tasks:
       - task: deploy
       - task: test
 
+  # Test Tasks
   test:unit:
+    dir: '{{.USER_WORKING_DIR}}'
     watch: true
     sources:
       - 'chart/unittests/**/*_test.yaml'
     cmds:
-      - helm unittest -f "chart/unittests/**/*_test.yaml" chart
-
+      - helm unittest -f chart/unittests/**/*_test.yaml chart
+  test:e2e:
+    dir: '{{.USER_WORKING_DIR}}'
+    cmds:
+      - rm -fr {{.BASE_MOUNT_DIR}}/cypress/*
+      - helm test {{.RELEASE_NAME}} -n bigbang
   test:
-    cmds:
-      - helm test monitoring-monitoring -n bigbang
-    
-  templateold:
-    cmds:
-      - helm template oci://registry1.dso.mil/bigbang/kiali:2.12.0-bb.1 --set=bbtests.enabled=true --set=networkPolicies.enabled=true | yq e 'select(.kind == "NetworkPolicy")'
-  templatenew:
-    cmds:
-      - helm template chart --set=networkPolicies.enabled=true --set=bbtests.enabled=true | yq e 'select(.kind == "NetworkPolicy")'
+    - task: test:unit
+    - task: test:e2e
