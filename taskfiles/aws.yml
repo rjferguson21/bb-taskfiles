@@ -7,8 +7,9 @@ vars:
 tasks:
   ec2:
     desc: Create an EC2 instance for BigBang development using k3d-dev script
-    DOCKER_HOST: 
-      sh: "yq .DOCKER_HOST dev.yaml"
+    vars:
+      DOCKER_HOST: 
+        sh: "yq .DOCKER_HOST dev.yaml"
     cmds:
       - "{{.BIGBANG_DIR}}/docs/assets/scripts/developer/k3d-dev.sh"
       - task: ec2:ssh-config
