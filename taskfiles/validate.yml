@@ -1,0 +1,83 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+version: '3'
+
+includes:
+  main:
+    taskfile: ../Taskfile.yml
+
+tasks:
+  setup:
+    desc: Clone BigBang and Kiali repositories for validation
+    cmds:
+      - echo "=== Setting up validation repositories ==="
+      - |
+        if [ ! -d bigbang ]; then
+          echo "Cloning BigBang repository..."
+          git clone https://repo1.dso.mil/big-bang/bigbang.git bigbang --depth 1
+        else
+          echo "✓ BigBang repository already exists"
+        fi
+      - |
+        if [ ! -d kiali ]; then
+          echo "Cloning Kiali package repository..."
+          git clone https://repo1.dso.mil/big-bang/product/packages/kiali.git kiali --depth 1
+        else
+          echo "✓ Kiali repository already exists"
+        fi
+      - echo "✓ Repository setup complete"
+
+  default:
+    desc: Run all validation checks (k3d, deploy, test)
+    cmds:
+      - task: setup
+      - task: k3d
+      - task: deploy
+      - task: test
+      - echo "✓ All validation checks passed!"
+
+  k3d:
+    desc: Validate k3d cluster creation works
+    cmds:
+      - echo "=== Validating k3d cluster creation ==="
+      - task: main:k3d:create
+        vars:
+          BASE_MOUNT_DIR: "{{.USER_WORKING_DIR}}/dev"
+      - kubectl cluster-info
+      - kubectl get nodes
+      - kubectl get namespaces
+      - echo "✓ k3d cluster validation successful"
+
+  deploy:
+    desc: Validate BigBang deployment works (minimal test)
+    cmds:
+      - echo "=== Validating BigBang deployment ==="
+      - mkdir -p "{{.USER_WORKING_DIR}}/dev/cypress"
+      - task: main:deploy
+        vars:
+          DISABLE_CORE: "true"
+      - kubectl get helmreleases -A
+      - echo "✓ BigBang deployment validation successful"
+
+  test:
+    desc: Validate BigBang tests work
+    cmds:
+      - echo "=== Validating BigBang tests ==="
+      - task: main:test
+      - echo "✓ BigBang test validation successful"
+
+  package:
+    desc: Validate package deployment works (using kiali)
+    cmds:
+      - task: setup
+      - echo "=== Validating package deployment (kiali) ==="
+      - cd kiali && task -t {{.TASKFILE_DIR}}/package.yml deploy PACKAGE=kiali DISABLE_CORE=false
+      - kubectl get helmrelease kiali -n bigbang
+      - echo "✓ Package deployment validation successful"
+
+  cleanup:
+    desc: Clean up validation artifacts
+    cmds:
+      - echo "Cleaning up..."
+      - k3d cluster delete bb-helm || true
+      - rm -rf "{{.USER_WORKING_DIR}}/dev" || true
+      - echo "✓ Cleanup complete"

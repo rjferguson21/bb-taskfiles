@@ -27,7 +27,7 @@ tasks:
     cmds:
       - task: dev:deploy
         vars:
-          DISABLE_CORE: "false"
+          DISABLE_CORE: "{{.DISABLE_CORE}}"
           BIGBANG_DIR: "{{.BIGBANG_DIR}}"
           EXTRA_ARGS: -f tests/test-values.yaml --set={{.PACKAGE_PATH}}.git.branch=$(git rev-parse --abbrev-ref HEAD) --set={{.PACKAGE_PATH}}.git.tag=null {{ .EXTRA_VALUES }}
 
@@ -58,7 +58,7 @@ tasks:
   test:unit:
     dir: '{{.USER_WORKING_DIR}}'
     cmds:
-      - helm unittest -f chart/unittests/**/*_test.yaml chart
+      - helm unittest -f "chart/unittests/**/*_test.yaml" chart
   test:e2e:
     vars:
       PACKAGE:

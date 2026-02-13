@@ -3,14 +3,12 @@ version: '3'
 
 vars:
   BIGBANG_DIR: /home/rob/bb/bigbang
-  BIGBANG_K3D_CHART: oci://ghcr.io/rjferguson21/bb-k3d:0.2.3
+  BIGBANG_K3D_CHART: oci://ghcr.io/rjferguson21/bb-k3d:0.2.5
   LOCAL_TMP: "{{.USER_WORKING_DIR}}/dev"
 
 includes:
   aws:
     taskfile: ./taskfiles/aws.yml
-  registry:
-    taskfile: ./taskfiles/registry.yml
 
 tasks:
   default:
