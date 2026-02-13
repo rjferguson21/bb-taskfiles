@@ -1,0 +1,26 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+version: '3'
+
+tasks:
+  metrics:
+    desc: Check Prometheus targets health by pattern (e.g., task monitoring -- kube-state)
+    vars:
+      PROMETHEUS_URL: '{{.PROMETHEUS_URL | default "https://prometheus.dev.bigbang.mil"}}'
+    cmds:
+      - PROMETHEUS_URL="{{.PROMETHEUS_URL}}" {{.TASKFILE_DIR}}/../scripts/monitoring.sh {{.CLI_ARGS}}
+
+  network:
+    desc: Check for Istio/Envoy networking errors in pod logs
+    vars:
+      NAMESPACE: '{{.NAMESPACE | default ""}}'
+      POD_PATTERN: '{{.POD_PATTERN | default ""}}'
+    cmds:
+      - '{{.TASKFILE_DIR}}/../scripts/network.sh {{.NAMESPACE}} {{.POD_PATTERN}}'
+
+  pending:
+    desc: Check MR pipeline status and show failed jobs
+    dir: '{{.USER_WORKING_DIR}}'
+    vars:
+      MR_URL: '{{.MR_URL | default ""}}'
+    cmds:
+      - '{{.TASKFILE_DIR}}/../scripts/pending.sh {{if .MR_URL}}{{.MR_URL}}{{end}}'

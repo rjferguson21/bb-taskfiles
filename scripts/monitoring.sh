@@ -82,7 +82,7 @@ total_count=$(echo "$targets_json" | jq -r --arg pattern "$PATTERN" '
 
 if [[ "$total_count" -eq 0 ]]; then
     echo "No targets found matching pattern: $PATTERN"
-    exit 1
+    exit 0
 fi
 
 echo "Targets matching '$PATTERN': $healthy_count/$total_count healthy"
