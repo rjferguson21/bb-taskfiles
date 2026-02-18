@@ -12,7 +12,7 @@ tasks:
   network:
     desc: Check for Istio/Envoy networking errors in pod logs
     vars:
-      NAMESPACE: '{{.NAMESPACE | default ""}}'
+      NAMESPACE: '{{.NAMESPACE | default .PACKAGE_NAMESPACE}}'
       POD_PATTERN: '{{.POD_PATTERN | default ""}}'
     cmds:
       - '{{.TASKFILE_DIR}}/../scripts/network.sh {{.NAMESPACE}} {{.POD_PATTERN}}'

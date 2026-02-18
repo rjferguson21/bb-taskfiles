@@ -6,9 +6,21 @@ vars:
   BIGBANG_K3D_CHART: oci://ghcr.io/rjferguson21/bb-k3d:0.2.5
   LOCAL_TMP: "{{.USER_WORKING_DIR}}/dev"
   BASE_MOUNT_DIR: "{{.USER_WORKING_DIR}}/dev"
-  PACKAGE: keycloak
+  PACKAGE:
+    sh: basename -s .git "$(git -C {{.USER_WORKING_DIR}} remote get-url origin 2>/dev/null)" 2>/dev/null || echo "keycloak"
   PACKAGE_PATH:
     sh: 'yq e ".. | (select(has(\"git\")) or (select(has(\"helmRepo\")))) | (path | join(\".\")) | select(. == \"*{{.PACKAGE}}\")" /home/rob/bb/bigbang/chart/values.yaml'
+  PACKAGE_NAMESPACE:
+    sh: |
+      # Try HelmRelease targetNamespace first, then values.yaml, then fall back to package name
+      ns=$(grep -h "targetNamespace:" /home/rob/bb/bigbang/chart/templates/{{.PACKAGE}}/helmrelease.yaml 2>/dev/null | head -1 | awk '{print $2}')
+      if [ -z "$ns" ] || echo "$ns" | grep -qF '{{ "{{" }}'; then
+        pkg_path="{{.PACKAGE_PATH}}"
+        if [ -n "$pkg_path" ]; then
+          ns=$(yq e ".$pkg_path.namespace // \"\"" /home/rob/bb/bigbang/chart/values.yaml)
+        fi
+      fi
+      echo "${ns:-{{.PACKAGE}}}"
 
 includes:
   aws:
@@ -43,6 +55,7 @@ tasks:
       - task: package:test
 
   package:deploy:
+    desc: Deploy BigBang with the current package branch from CWD
     dir: '{{.USER_WORKING_DIR}}'
     vars:
       BIGBANG_DIR: /home/rob/bb/bigbang
@@ -54,6 +67,7 @@ tasks:
           EXTRA_ARGS: -f tests/test-values.yaml --set={{.PACKAGE_PATH}}.git.branch=$(git rev-parse --abbrev-ref HEAD) --set={{.PACKAGE_PATH}}.git.tag=null {{ .EXTRA_VALUES }}
 
   package:deploy:sso:
+    desc: Deploy BigBang with SSO enabled using local Keycloak
     dir: '{{.USER_WORKING_DIR}}'
     vars:
       BIGBANG_DIR: /home/rob/bb/bigbang
@@ -64,6 +78,7 @@ tasks:
           EXTRA_ARGS: -f tests/test-values.yaml --set={{.PACKAGE_PATH}}.git.branch=$(git rev-parse --abbrev-ref HEAD) --set={{.PACKAGE_PATH}}.git.tag=null -f docs/dev-overrides/minimal.yaml -f docs/dev-overrides/kiali-testing-local-keycloak.yaml
 
   package:upgrade:
+    desc: Test package upgrade from released version to current branch
     dir: '{{.USER_WORKING_DIR}}'
     vars:
       BIGBANG_DIR: /home/rob/bb/bigbang
@@ -77,23 +92,34 @@ tasks:
       - task: package:test
 
   package:test:unit:
+    desc: Run Helm unit tests for the package
     dir: '{{.USER_WORKING_DIR}}'
     cmds:
       - helm unittest -f "chart/unittests/**/*_test.yaml" chart
 
   package:test:e2e:
+    desc: Run Helm e2e tests against the deployed package
     vars:
       PACKAGE:
         sh: cat chart/Chart.yaml | yq '.name'
       RELEASE_NAME:
-        sh: helm list -A -o json | jq '.[] | select(.chart | startswith("{{.PACKAGE}}")) | .name'
+        sh: helm list -A -o json | jq -r '[.[] | select(.chart | startswith("{{.PACKAGE}}")) | .name] | join(" ")'
     dir: '{{.USER_WORKING_DIR}}'
     cmds:
       - rm -fr {{.BASE_MOUNT_DIR}}/cypress/*
       - for: { var: RELEASE_NAME }
-        cmd: helm test {{.RELEASE_NAME}} -n bigbang
+        cmd: helm test {{.ITEM}} -n bigbang
 
   package:test:
+    desc: Run all package tests (unit and e2e)
     cmds:
       - task: package:test:unit
       - task: package:test:e2e
+
+  package:info:
+    desc: Display detected package name, path, and namespace from CWD
+    cmds:
+      - echo "PACKAGE={{.PACKAGE}}"
+      - echo "PACKAGE_PATH={{.PACKAGE_PATH}}"
+      - echo "PACKAGE_NAMESPACE={{.PACKAGE_NAMESPACE}}"
+      - echo "USER_WORKING_DIR={{.USER_WORKING_DIR}}"
