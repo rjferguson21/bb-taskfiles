@@ -54,6 +54,70 @@ tasks:
       - task: package:deploy
       - task: package:test
 
+  package:remove:
+    desc: Remove package HelmRelease and Helm release from the cluster
+    dir: '{{.USER_WORKING_DIR}}'
+    vars:
+      HELMRELEASE_NAME:
+        sh: kubectl get helmrelease -n bigbang -o json 2>/dev/null | jq -r --arg pkg "{{.PACKAGE}}" '.items[] | select(.spec.chart.spec.chart == $pkg or .metadata.name == $pkg) | .metadata.name' | head -1
+      RELEASE_NAME:
+        sh: helm list -n bigbang -o json | jq -r --arg pkg "{{.PACKAGE}}" '[.[] | select(.chart | startswith($pkg + "-"))] | .[0].name // empty'
+    cmds:
+      - |
+        if [ -z "{{.HELMRELEASE_NAME}}" ]; then
+          echo "Warning: No HelmRelease found for {{.PACKAGE}}"
+        else
+          echo "Found HelmRelease: {{.HELMRELEASE_NAME}}"
+          flux suspend helmrelease {{.HELMRELEASE_NAME}} -n bigbang || true
+        fi
+      - |
+        # Remove finalizers from all resources in the namespace first to allow clean deletion
+        if kubectl get ns {{.PACKAGE_NAMESPACE}} >/dev/null 2>&1; then
+          echo "Removing finalizers from resources in {{.PACKAGE_NAMESPACE}}"
+          for resource in $(kubectl api-resources --verbs=list --namespaced -o name 2>/dev/null); do
+            kubectl get "$resource" -n {{.PACKAGE_NAMESPACE}} -o json 2>/dev/null | \
+              jq -r '.items[] | select(.metadata.finalizers != null) | "\(.kind)/\(.metadata.name)"' | \
+              while read -r item; do
+                [ -n "$item" ] && echo "  Removing finalizer from $item" && \
+                kubectl patch "$item" -n {{.PACKAGE_NAMESPACE}} --type=merge -p '{"metadata":{"finalizers":[]}}' 2>/dev/null || true
+              done
+          done
+        fi
+      - |
+        if [ -z "{{.RELEASE_NAME}}" ]; then
+          echo "Warning: No Helm release found for {{.PACKAGE}}"
+        else
+          echo "Found Helm release: {{.RELEASE_NAME}}"
+          helm uninstall {{.RELEASE_NAME}} -n bigbang || true
+        fi
+      - |
+        if [ -n "{{.HELMRELEASE_NAME}}" ]; then
+          kubectl delete helmrelease {{.HELMRELEASE_NAME}} -n bigbang --ignore-not-found
+        fi
+      - |
+        # Delete Flux GitRepository source for this package
+        kubectl delete gitrepository {{.PACKAGE}} -n bigbang --ignore-not-found 2>/dev/null && \
+          echo "Deleted GitRepository: {{.PACKAGE}}" || true
+      - |
+        # Delete the namespace
+        if kubectl get ns {{.PACKAGE_NAMESPACE}} >/dev/null 2>&1; then
+          echo "Deleting namespace: {{.PACKAGE_NAMESPACE}}"
+          kubectl delete ns {{.PACKAGE_NAMESPACE}} --ignore-not-found --timeout=60s
+        fi
+
+  package:redeploy:
+    desc: Uninstall package release and redeploy from current branch
+    dir: '{{.USER_WORKING_DIR}}'
+    vars:
+      BIGBANG_DIR: /home/rob/bb/bigbang
+    cmds:
+      - task: package:remove
+      - task: package:deploy
+        vars:
+          DISABLE_CORE: "{{.DISABLE_CORE}}"
+          BIGBANG_DIR: "{{.BIGBANG_DIR}}"
+          EXTRA_VALUES: "{{.EXTRA_VALUES}}"
+
   package:deploy:
     desc: Deploy BigBang with the current package branch from CWD
     dir: '{{.USER_WORKING_DIR}}'
