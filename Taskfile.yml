@@ -3,13 +3,16 @@ version: '3'
 
 vars:
   BIGBANG_DIR: /home/rob/bb/bigbang
-  BIGBANG_K3D_CHART: oci://ghcr.io/rjferguson21/bb-k3d:0.2.5
+  BIGBANG_K3D_CHART: oci://ghcr.io/rjferguson21/bb-k3d:0.2.6
   LOCAL_TMP: "{{.USER_WORKING_DIR}}/dev"
   BASE_MOUNT_DIR: "{{.USER_WORKING_DIR}}/dev"
   PACKAGE:
     sh: basename -s .git "$(git -C {{.USER_WORKING_DIR}} remote get-url origin 2>/dev/null)" 2>/dev/null || echo "keycloak"
   PACKAGE_PATH:
-    sh: 'yq e ".. | (select(has(\"git\")) or (select(has(\"helmRepo\")))) | (path | join(\".\")) | select(. == \"*{{.PACKAGE}}\")" /home/rob/bb/bigbang/chart/values.yaml'
+    sh: |
+      # Convert kebab-case to camelCase for matching (istio-gateway -> istioGateway)
+      camel=$(echo "{{.PACKAGE}}" | sed -E 's/-([a-z])/\U\1/g')
+      yq e ".. | (select(has(\"git\")) or (select(has(\"helmRepo\")))) | (path | join(\".\")) | select(test(\"(?i)({{.PACKAGE}}|$camel)$\"))" /home/rob/bb/bigbang/chart/values.yaml | head -1
   PACKAGE_NAMESPACE:
     sh: |
       # Try HelmRelease targetNamespace first, then values.yaml, then fall back to package name
@@ -44,7 +47,6 @@ tasks:
       - task: deploy
         vars:
           DISABLE_CORE: "{{.DISABLE_CORE}}"
-      - task: test
 
   # Package Tasks
   package:default:

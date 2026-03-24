@@ -3,7 +3,7 @@ version: '3'
 
 vars:
   BIGBANG_DIR: /home/rob/bb/bigbang
-  BIGBANG_K3D_CHART: oci://ghcr.io/rjferguson21/bb-k3d:0.2.5
+  BIGBANG_K3D_CHART: oci://ghcr.io/rjferguson21/bb-k3d:0.2.7
   LOCAL_TMP: "{{.USER_WORKING_DIR}}/dev"
 
 tasks:

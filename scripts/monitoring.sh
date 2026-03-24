@@ -88,6 +88,20 @@ fi
 echo "Targets matching '$PATTERN': $healthy_count/$total_count healthy"
 echo
 
+# Print all matching targets
+all_targets=$(echo "$targets_json" | jq -r --arg pattern "$PATTERN" '
+    .data.activeTargets[]
+    | select((.labels.job // "" | test($pattern; "i")) or ((.scrapePool // "") | test($pattern; "i")))
+    | "\(.health)\t\(.labels.job // "unknown")\t\(.scrapeUrl // "unknown")"
+')
+
+echo "All matching targets:"
+echo "STATUS    JOB                          SCRAPE URL"
+echo "$all_targets" | while IFS=$'\t' read -r status job url; do
+    printf "%-9s %-28s %s\n" "$status" "$job" "$url"
+done
+echo
+
 if [[ -n "$unhealthy" ]]; then
     echo "Unhealthy targets:"
     echo "STATUS    JOB                          ERROR"

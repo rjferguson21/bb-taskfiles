@@ -24,3 +24,13 @@ tasks:
       MR_URL: '{{.MR_URL | default ""}}'
     cmds:
       - '{{.TASKFILE_DIR}}/../scripts/pending.sh {{if .MR_URL}}{{.MR_URL}}{{end}}'
+
+  readme:
+    desc: Regenerate README.md using helm-docs and gluon templates
+    dir: '{{.USER_WORKING_DIR}}'
+    cmds:
+      - curl -LO https://repo1.dso.mil/big-bang/product/packages/gluon/-/raw/master/docs/README.md.gotmpl
+      - curl -LO https://repo1.dso.mil/big-bang/product/packages/gluon/-/raw/master/docs/.helmdocsignore
+      - curl -LO https://repo1.dso.mil/big-bang/product/packages/gluon/-/raw/master/docs/_templates.gotmpl
+      - docker run --rm -v "$(pwd):/helm-docs" -u $(id -u) jnorwood/helm-docs:v1.14.2 -s file -t /helm-docs/README.md.gotmpl -t /helm-docs/_templates.gotmpl --dry-run > README.md
+      - rm -f .helmdocsignore README.md.gotmpl _templates.gotmpl
