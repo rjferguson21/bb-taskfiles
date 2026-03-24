@@ -1,0 +1,36 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+version: '3'
+
+tasks:
+  metrics:
+    desc: Check Prometheus targets health by pattern (e.g., task monitoring -- kube-state)
+    vars:
+      PROMETHEUS_URL: '{{.PROMETHEUS_URL | default "https://prometheus.dev.bigbang.mil"}}'
+    cmds:
+      - PROMETHEUS_URL="{{.PROMETHEUS_URL}}" {{.TASKFILE_DIR}}/../scripts/monitoring.sh {{.CLI_ARGS}}
+
+  network:
+    desc: Check for Istio/Envoy networking errors in pod logs
+    vars:
+      NAMESPACE: '{{.NAMESPACE | default .PACKAGE_NAMESPACE}}'
+      POD_PATTERN: '{{.POD_PATTERN | default ""}}'
+    cmds:
+      - '{{.TASKFILE_DIR}}/../scripts/network.sh {{.NAMESPACE}} {{.POD_PATTERN}}'
+
+  pending:
+    desc: Check MR pipeline status and show failed jobs
+    dir: '{{.USER_WORKING_DIR}}'
+    vars:
+      MR_URL: '{{.MR_URL | default ""}}'
+    cmds:
+      - '{{.TASKFILE_DIR}}/../scripts/pending.sh {{if .MR_URL}}{{.MR_URL}}{{end}}'
+
+  readme:
+    desc: Regenerate README.md using helm-docs and gluon templates
+    dir: '{{.USER_WORKING_DIR}}'
+    cmds:
+      - curl -LO https://repo1.dso.mil/big-bang/product/packages/gluon/-/raw/master/docs/README.md.gotmpl
+      - curl -LO https://repo1.dso.mil/big-bang/product/packages/gluon/-/raw/master/docs/.helmdocsignore
+      - curl -LO https://repo1.dso.mil/big-bang/product/packages/gluon/-/raw/master/docs/_templates.gotmpl
+      - docker run --rm -v "$(pwd):/helm-docs" -u $(id -u) jnorwood/helm-docs:v1.14.2 -s file -t /helm-docs/README.md.gotmpl -t /helm-docs/_templates.gotmpl --dry-run > README.md
+      - rm -f .helmdocsignore README.md.gotmpl _templates.gotmpl

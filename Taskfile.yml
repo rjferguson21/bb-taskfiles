@@ -3,120 +3,189 @@ version: '3'
 
 vars:
   BIGBANG_DIR: /home/rob/bb/bigbang
-  BIGBANG_K3D_CHART: oci://ghcr.io/rjferguson21/bb-k3d:0.2.3
+  BIGBANG_K3D_CHART: oci://ghcr.io/rjferguson21/bb-k3d:0.2.6
   LOCAL_TMP: "{{.USER_WORKING_DIR}}/dev"
+  BASE_MOUNT_DIR: "{{.USER_WORKING_DIR}}/dev"
+  PACKAGE:
+    sh: basename -s .git "$(git -C {{.USER_WORKING_DIR}} remote get-url origin 2>/dev/null)" 2>/dev/null || echo "keycloak"
+  PACKAGE_PATH:
+    sh: |
+      # Convert kebab-case to camelCase for matching (istio-gateway -> istioGateway)
+      camel=$(echo "{{.PACKAGE}}" | sed -E 's/-([a-z])/\U\1/g')
+      yq e ".. | (select(has(\"git\")) or (select(has(\"helmRepo\")))) | (path | join(\".\")) | select(test(\"(?i)({{.PACKAGE}}|$camel)$\"))" /home/rob/bb/bigbang/chart/values.yaml | head -1
+  PACKAGE_NAMESPACE:
+    sh: |
+      # Try HelmRelease targetNamespace first, then values.yaml, then fall back to package name
+      ns=$(grep -h "targetNamespace:" /home/rob/bb/bigbang/chart/templates/{{.PACKAGE}}/helmrelease.yaml 2>/dev/null | head -1 | awk '{print $2}')
+      if [ -z "$ns" ] || echo "$ns" | grep -qF '{{ "{{" }}'; then
+        pkg_path="{{.PACKAGE_PATH}}"
+        if [ -n "$pkg_path" ]; then
+          ns=$(yq e ".$pkg_path.namespace // \"\"" /home/rob/bb/bigbang/chart/values.yaml)
+        fi
+      fi
+      echo "${ns:-{{.PACKAGE}}}"
 
 includes:
   aws:
     taskfile: ./taskfiles/aws.yml
-  registry:
-    taskfile: ./taskfiles/registry.yml
+  util:
+    taskfile: ./taskfiles/util.yml
+  base:
+    taskfile: ./taskfiles/base.yml
+    flatten: true
 
 tasks:
   default:
-    desc: Create EC2 instance, create k3d cluster, deploy BigBang, and run tests
-    vars:
-      DEV_VALUES_RAW:
-        sh: "cat dev.yaml || echo '{}' | yq e -"
-      DEV_VALUES:
-        ref: "fromYaml .DEV_VALUES_RAW"
-    cmds:
-      - task: aws:ec2
-      - task: setuphost
-        vars:
-          COMMAND_PREFIX: "{{ .DEV_VALUES.COMMAND_PREFIX }}"
-          BASE_MOUNT_DIR: "{{ .DEV_VALUES.BASE_MOUNT_DIR }}"
-          EC2_PUBLIC_IP: "{{ .DEV_VALUES.EC2_PUBLIC_IP }}"
-      - task: k3d:create
-        vars: 
-          BASE_MOUNT_DIR: "{{ .DEV_VALUES.BASE_MOUNT_DIR }}"
-          DOCKER_HOST: "{{ .DEV_VALUES.DOCKER_HOST }}"
-      - task: deploy
-      - task: test
-
-  localdev:
     desc: Create a k3d cluster, deploy BigBang, and run tests
     cmds:
       - task: setuphost
         vars:
           BASE_MOUNT_DIR: "{{ .LOCAL_TMP }}"
-      - task: k3d:create
+      - task: k3d-create
         vars:
           BASE_MOUNT_DIR: "{{ .LOCAL_TMP }}"
       - task: deploy
         vars:
           DISABLE_CORE: "{{.DISABLE_CORE}}"
-      - task: test
 
-  k3d:create:
-    desc: Create a k3d cluster for testing with flux and MetalLB
+  # Package Tasks
+  package:default:
+    desc: Create a k3d cluster and deploy a BigBang package
+    cmds:
+      - task: k3d-create
+      - task: package:deploy
+      - task: package:test
+
+  package:remove:
+    desc: Remove package HelmRelease and Helm release from the cluster
     dir: '{{.USER_WORKING_DIR}}'
     vars:
-      TEMPLATE_VARS: --set=k3d.serverIP="0.0.0.0" --set=k3d.volumeBaseDir="{{.BASE_MOUNT_DIR}}" --set=registry1.username=$REGISTRY1_USERNAME --set=registry1.password=$REGISTRY1_PASSWORD
+      HELMRELEASE_NAME:
+        sh: kubectl get helmrelease -n bigbang -o json 2>/dev/null | jq -r --arg pkg "{{.PACKAGE}}" '.items[] | select(.spec.chart.spec.chart == $pkg or .metadata.name == $pkg) | .metadata.name' | head -1
+      RELEASE_NAME:
+        sh: helm list -n bigbang -o json | jq -r --arg pkg "{{.PACKAGE}}" '[.[] | select(.chart | startswith($pkg + "-"))] | .[0].name // empty'
     cmds:
-      - mkdir -p {{.LOCAL_TMP}}
-      - echo "*" >{{.LOCAL_TMP}}/.gitignore
-      - helm template k3d "{{.BIGBANG_K3D_CHART}}" {{.TEMPLATE_VARS}} > {{.LOCAL_TMP}}/bootstrap.yaml
-      - cat {{.LOCAL_TMP}}/bootstrap.yaml | yq e 'select(.kind == "Simple")' > {{.LOCAL_TMP}}/k3d.yaml
-      - cat {{.LOCAL_TMP}}/bootstrap.yaml | yq e 'select(.kind == "ConfigMap" and .metadata.name == "bigbang-k3d-dev-values") | .stringData["values.yaml"]' > {{.LOCAL_TMP}}/dev-values.yaml
-      - cat {{.LOCAL_TMP}}/bootstrap.yaml | yq e 'select(.kind == "ConfigMap" and .metadata.name == "bigbang-k3d-dev-values") | .stringData["etchost"]' > {{.LOCAL_TMP}}/etchost
-      - DOCKER_HOST={{.DOCKER_HOST}} k3d cluster delete -a && DOCKER_HOST={{.DOCKER_HOST}} k3d cluster create --config {{.LOCAL_TMP}}/k3d.yaml --image=rancher/k3s:v1.33.3-k3s1
-      - i=0; until kubectl get deployment helm-controller >/dev/null 2>&1 || [ $i -ge 3 ]; do sleep 1; i=$((i+1)); done
+      - |
+        if [ -z "{{.HELMRELEASE_NAME}}" ]; then
+          echo "Warning: No HelmRelease found for {{.PACKAGE}}"
+        else
+          echo "Found HelmRelease: {{.HELMRELEASE_NAME}}"
+          flux suspend helmrelease {{.HELMRELEASE_NAME}} -n bigbang || true
+        fi
+      - |
+        # Remove finalizers from all resources in the namespace first to allow clean deletion
+        if kubectl get ns {{.PACKAGE_NAMESPACE}} >/dev/null 2>&1; then
+          echo "Removing finalizers from resources in {{.PACKAGE_NAMESPACE}}"
+          for resource in $(kubectl api-resources --verbs=list --namespaced -o name 2>/dev/null); do
+            kubectl get "$resource" -n {{.PACKAGE_NAMESPACE}} -o json 2>/dev/null | \
+              jq -r '.items[] | select(.metadata.finalizers != null) | "\(.kind)/\(.metadata.name)"' | \
+              while read -r item; do
+                [ -n "$item" ] && echo "  Removing finalizer from $item" && \
+                kubectl patch "$item" -n {{.PACKAGE_NAMESPACE}} --type=merge -p '{"metadata":{"finalizers":[]}}' 2>/dev/null || true
+              done
+          done
+        fi
+      - |
+        if [ -z "{{.RELEASE_NAME}}" ]; then
+          echo "Warning: No Helm release found for {{.PACKAGE}}"
+        else
+          echo "Found Helm release: {{.RELEASE_NAME}}"
+          helm uninstall {{.RELEASE_NAME}} -n bigbang || true
+        fi
+      - |
+        if [ -n "{{.HELMRELEASE_NAME}}" ]; then
+          kubectl delete helmrelease {{.HELMRELEASE_NAME}} -n bigbang --ignore-not-found
+        fi
+      - |
+        # Delete Flux GitRepository source for this package
+        kubectl delete gitrepository {{.PACKAGE}} -n bigbang --ignore-not-found 2>/dev/null && \
+          echo "Deleted GitRepository: {{.PACKAGE}}" || true
+      - |
+        # Delete the namespace
+        if kubectl get ns {{.PACKAGE_NAMESPACE}} >/dev/null 2>&1; then
+          echo "Deleting namespace: {{.PACKAGE_NAMESPACE}}"
+          kubectl delete ns {{.PACKAGE_NAMESPACE}} --ignore-not-found --timeout=60s
+        fi
 
-  setuphost:
-    desc: Sets up etc hosts for k3d cluster host, creates cypress directory
+  package:redeploy:
+    desc: Uninstall package release and redeploy from current branch
     dir: '{{.USER_WORKING_DIR}}'
-    status:
-      - test -f {{.LOCAL_TMP}}/.setuphost-done
-    cmds:
-      - "{{ .COMMAND_PREFIX }} mkdir -p \"{{.BASE_MOUNT_DIR}}/cypress\""
-      - "{{ .COMMAND_PREFIX }} sudo sed -i '/dev.bigbang.mil/d' /etc/hosts"
-      - "cat {{.LOCAL_TMP}}/etchost | {{ .COMMAND_PREFIX }} sudo tee -a /etc/hosts"
-      - touch {{.LOCAL_TMP}}/.setuphost-done
-
-  deploy:
-    desc: Deploy a BigBang instance to the k3d cluster
-    dir: '{{.USER_WORKING_DIR}}'
-    cmds:
-      - helm upgrade --install bigbang {{.BIGBANG_DIR}}/chart
-        --namespace=bigbang --create-namespace --values {{.BIGBANG_DIR}}/tests/test-values.yaml
-        {{if eq .DISABLE_CORE "true"}}--values {{.BIGBANG_DIR}}/tests/disable-core-values.yaml{{end}}
-        --values {{.BIGBANG_DIR}}/chart/ingress-certs.yaml
-        --values {{.LOCAL_TMP}}/dev-values.yaml
-        --set=registryCredentials.username=$REGISTRY1_USERNAME
-        --set=registryCredentials.password=$REGISTRY1_PASSWORD
-        --set=flux.interval=5s
-        {{ .EXTRA_ARGS }}
-      - kubectl wait helmrelease -A --selector=app.kubernetes.io/instance=bigbang --for=condition=ready --timeout=800s
-
-  test:
-    desc: Run Big Bang gluon tests
-    cmds:
-      - for: ['kyverno-kyverno', 'kyverno-kyverno-policies']
-        cmd: helm test {{ .ITEM }} -n bigbang
-  
-  schema-validate:
-    desc: Run Big Bang schema valid
     vars:
       BIGBANG_DIR: /home/rob/bb/bigbang
-      PACKAGES: ['kiali', 'loki']
-        # sh: "yq eval '. | to_entries | map(select(.value | has(\"sourceType\"))) | map(.key) | .[]'  /home/rob/bb/bigbang/chart/values.yaml"
     cmds:
-      - for: { var: PACKAGES }
-        cmd: helm template {{.BIGBANG_DIR}}/chart -f {{.BIGBANG_DIR}}/tests/test-values.yaml |
-          yq e 'select(.kind == "Secret" and .metadata.name == "release-name-{{.ITEM}}-values")' |
-          yq -oy '.stringData.defaults as $defaults | .stringData.overlays as $overlays | ($defaults | from_yaml) * ($overlays | from_yaml)' - |
-          helm template oci://registry1.dso.mil/bigbang/{{.ITEM}}:$(yq '.{{.ITEM}}.git.tag' {{.BIGBANG_DIR}}/chart/values.yaml) -f -
-      # - for: ['keycloak']
-      #   cmd: helm template {{.BIGBANG_DIR}}/chart -f {{.BIGBANG_DIR}}/tests/test-values.yaml | yq e 'select(.kind == "Secret" and .metadata.name == "release-name-{{.ITEM}}-values")' | yq -oy '.stringData.defaults as $defaults | .stringData.overlays as $overlays | ($defaults | from_yaml) * ($overlays | from_yaml)' - | helm template oci://registry1.dso.mil/bigbang/{{.ITEM}}:$(yq '.addons.{{.ITEM}}.git.tag' {{.BIGBANG_DIR}}/chart/values.yaml) -f -
+      - task: package:remove
+      - task: package:deploy
+        vars:
+          DISABLE_CORE: "{{.DISABLE_CORE}}"
+          BIGBANG_DIR: "{{.BIGBANG_DIR}}"
+          EXTRA_VALUES: "{{.EXTRA_VALUES}}"
 
-
-  template-package:
-    desc: Template Package
+  package:deploy:
+    desc: Deploy BigBang with the current package branch from CWD
+    dir: '{{.USER_WORKING_DIR}}'
     vars:
-      PACKAGE: loki
       BIGBANG_DIR: /home/rob/bb/bigbang
-    cmd: helm template {{.BIGBANG_DIR}}/chart -f {{.BIGBANG_DIR}}/tests/test-values.yaml |
-        yq e 'select(.kind == "Secret" and .metadata.name == "release-name-{{.ITEM}}-values")' |
-        yq -oy '.stringData.defaults as $defaults | .stringData.overlays as $overlays | ($defaults | from_yaml) * ($overlays | from_yaml)' - |
-        helm template oci://registry1.dso.mil/bigbang/{{.PACKAGE}}:$(yq '.{{.PACKAGE}}.git.tag' {{.BIGBANG_DIR}}/chart/values.yaml) -f -
+    cmds:
+      - task: deploy
+        vars:
+          DISABLE_CORE: "{{.DISABLE_CORE}}"
+          BIGBANG_DIR: "{{.BIGBANG_DIR}}"
+          EXTRA_ARGS: -f tests/test-values.yaml --set={{.PACKAGE_PATH}}.git.branch=$(git rev-parse --abbrev-ref HEAD) --set={{.PACKAGE_PATH}}.git.tag=null {{ .EXTRA_VALUES }}
+
+  package:deploy:sso:
+    desc: Deploy BigBang with SSO enabled using local Keycloak
+    dir: '{{.USER_WORKING_DIR}}'
+    vars:
+      BIGBANG_DIR: /home/rob/bb/bigbang
+    cmds:
+      - task: deploy
+        vars:
+          BIGBANG_DIR: "{{.BIGBANG_DIR}}"
+          EXTRA_ARGS: -f tests/test-values.yaml --set={{.PACKAGE_PATH}}.git.branch=$(git rev-parse --abbrev-ref HEAD) --set={{.PACKAGE_PATH}}.git.tag=null -f docs/dev-overrides/minimal.yaml -f docs/dev-overrides/kiali-testing-local-keycloak.yaml
+
+  package:upgrade:
+    desc: Test package upgrade from released version to current branch
+    dir: '{{.USER_WORKING_DIR}}'
+    vars:
+      BIGBANG_DIR: /home/rob/bb/bigbang
+    cmds:
+      - task: k3d-create
+      - task: deploy
+        vars:
+          BIGBANG_DIR: "{{.BIGBANG_DIR}}"
+          EXTRA_ARGS: -f tests/test-values.yaml
+      - task: package:deploy
+      - task: package:test
+
+  package:test:unit:
+    desc: Run Helm unit tests for the package
+    dir: '{{.USER_WORKING_DIR}}'
+    cmds:
+      - helm unittest -f "chart/unittests/**/*_test.yaml" chart
+
+  package:test:e2e:
+    desc: Run Helm e2e tests against the deployed package
+    vars:
+      PACKAGE:
+        sh: cat chart/Chart.yaml | yq '.name'
+      RELEASE_NAME:
+        sh: helm list -A -o json | jq -r '[.[] | select(.chart | startswith("{{.PACKAGE}}")) | .name] | join(" ")'
+    dir: '{{.USER_WORKING_DIR}}'
+    cmds:
+      - rm -fr {{.BASE_MOUNT_DIR}}/cypress/*
+      - for: { var: RELEASE_NAME }
+        cmd: helm test {{.ITEM}} -n bigbang
+
+  package:test:
+    desc: Run all package tests (unit and e2e)
+    cmds:
+      - task: package:test:unit
+      - task: package:test:e2e
+
+  package:info:
+    desc: Display detected package name, path, and namespace from CWD
+    cmds:
+      - echo "PACKAGE={{.PACKAGE}}"
+      - echo "PACKAGE_PATH={{.PACKAGE_PATH}}"
+      - echo "PACKAGE_NAMESPACE={{.PACKAGE_NAMESPACE}}"
+      - echo "USER_WORKING_DIR={{.USER_WORKING_DIR}}"
