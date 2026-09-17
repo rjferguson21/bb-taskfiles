@@ -3,7 +3,7 @@ version: '3'
 
 vars:
   BIGBANG_DIR: /home/rob/bb/bigbang
-  BIGBANG_K3D_CHART: oci://ghcr.io/rjferguson21/bb-k3d:0.2.7
+  BIGBANG_K3D_CHART: oci://ghcr.io/rjferguson21/bb-k3d:0.3.4
   LOCAL_TMP: "{{.USER_WORKING_DIR}}/dev"
 
 tasks:
@@ -14,12 +14,13 @@ tasks:
       TEMPLATE_VARS: --set=k3d.serverIP="0.0.0.0" --set=k3d.volumeBaseDir="{{.BASE_MOUNT_DIR}}" --set=registry1.username=$REGISTRY1_USERNAME --set=registry1.password=$REGISTRY1_PASSWORD
     cmds:
       - mkdir -p {{.LOCAL_TMP}}
+      - mkdir -p {{.BASE_MOUNT_DIR}}/cypress
       - echo "*" >{{.LOCAL_TMP}}/.gitignore
       - helm template k3d "{{.BIGBANG_K3D_CHART}}" {{.TEMPLATE_VARS}} > {{.LOCAL_TMP}}/bootstrap.yaml
       - cat {{.LOCAL_TMP}}/bootstrap.yaml | yq e 'select(.kind == "Simple")' > {{.LOCAL_TMP}}/k3d.yaml
       - cat {{.LOCAL_TMP}}/bootstrap.yaml | yq e 'select(.kind == "ConfigMap" and .metadata.name == "bigbang-k3d-dev-values") | .stringData["values.yaml"]' > {{.LOCAL_TMP}}/dev-values.yaml
       - cat {{.LOCAL_TMP}}/bootstrap.yaml | yq e 'select(.kind == "ConfigMap" and .metadata.name == "bigbang-k3d-dev-values") | .stringData["etchost"]' > {{.LOCAL_TMP}}/etchost
-      - DOCKER_HOST={{.DOCKER_HOST}} k3d cluster delete -a && DOCKER_HOST={{.DOCKER_HOST}} k3d cluster create --config {{.LOCAL_TMP}}/k3d.yaml --image=rancher/k3s:v1.33.3-k3s1
+      - DOCKER_HOST={{.DOCKER_HOST}} k3d cluster delete -a && DOCKER_HOST={{.DOCKER_HOST}} k3d cluster create --config {{.LOCAL_TMP}}/k3d.yaml --image=rancher/k3s:v1.35.3-k3s1
       - i=0; until kubectl get deployment helm-controller >/dev/null 2>&1 || [ $i -ge 3 ]; do sleep 1; i=$((i+1)); done
 
   setuphost:
@@ -34,7 +35,7 @@ tasks:
       - touch {{.LOCAL_TMP}}/.setuphost-done
 
   deploy:
-    desc: Deploy a BigBang instance to the k3d cluster
+    desc: "Deploy a BigBang instance to the k3d cluster. Use EXTRA_ARGS for additional values (e.g., EXTRA_ARGS='--values tests/test-values-ambient.yaml')"
     dir: '{{.USER_WORKING_DIR}}'
     cmds:
       - helm upgrade --install bigbang {{.BIGBANG_DIR}}/chart

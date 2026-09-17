@@ -3,14 +3,35 @@ version: '3'
 
 vars:
   BIGBANG_DIR: /home/rob/bb/bigbang
-  BIGBANG_K3D_CHART: oci://ghcr.io/rjferguson21/bb-k3d:0.2.6
+  BIGBANG_K3D_CHART: oci://ghcr.io/rjferguson21/bb-k3d:0.3.4
   LOCAL_TMP: "{{.USER_WORKING_DIR}}/dev"
   BASE_MOUNT_DIR: "{{.USER_WORKING_DIR}}/dev"
   PACKAGE:
     sh: basename -s .git "$(git -C {{.USER_WORKING_DIR}} remote get-url origin 2>/dev/null)" 2>/dev/null || echo "keycloak"
   PACKAGE_PATH:
     sh: |
-      # Convert kebab-case to camelCase for matching (istio-gateway -> istioGateway)
+      # Reverse lookup: find the values.yaml path by matching git.repo URL to origin remote
+      origin_url=$(git -C {{.USER_WORKING_DIR}} remote get-url origin 2>/dev/null)
+      if [ -n "$origin_url" ]; then
+        # Normalize: remove .git suffix and trailing slashes for comparison
+        origin_normalized=$(echo "$origin_url" | sed 's/\.git$//' | sed 's:/$::')
+        # Find path where git.repo matches (also normalized)
+        result=$(yq e '.. | select(has("git")) | select(.git.repo) | {"path": (path | join(".")), "repo": .git.repo}' /home/rob/bb/bigbang/chart/values.yaml | \
+          awk -v origin="$origin_normalized" '
+            /^path:/ { path = $2 }
+            /^repo:/ {
+              repo = $2
+              gsub(/\.git$/, "", repo)
+              gsub(/\/$/, "", repo)
+              if (repo == origin) { print path; exit }
+            }
+          ')
+        if [ -n "$result" ]; then
+          echo "$result"
+          exit 0
+        fi
+      fi
+      # Fallback: match by package name (kebab-case to camelCase)
       camel=$(echo "{{.PACKAGE}}" | sed -E 's/-([a-z])/\U\1/g')
       yq e ".. | (select(has(\"git\")) or (select(has(\"helmRepo\")))) | (path | join(\".\")) | select(test(\"(?i)({{.PACKAGE}}|$camel)$\"))" /home/rob/bb/bigbang/chart/values.yaml | head -1
   PACKAGE_NAMESPACE:
@@ -36,7 +57,7 @@ includes:
 
 tasks:
   default:
-    desc: Create a k3d cluster, deploy BigBang, and run tests
+    desc: "Create a k3d cluster, deploy BigBang, and run tests. Use EXTRA_ARGS for additional values (e.g., EXTRA_ARGS='--values tests/test-values-ambient.yaml')"
     cmds:
       - task: setuphost
         vars:

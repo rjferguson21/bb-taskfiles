@@ -17,6 +17,19 @@ tasks:
     cmds:
       - '{{.TASKFILE_DIR}}/../scripts/network.sh {{.NAMESPACE}} {{.POD_PATTERN}}'
 
+  ambient:
+    desc: Check for Istio Ambient/ztunnel errors in logs
+    vars:
+      NAMESPACE: '{{.NAMESPACE | default "istio-system"}}'
+      POD_PATTERN: '{{.POD_PATTERN | default "ztunnel"}}'
+    cmds:
+      - '{{.TASKFILE_DIR}}/../scripts/ambient.sh {{.NAMESPACE}} {{.POD_PATTERN}}'
+
+  health:
+    desc: "Fast deploy health check (HelmReleases, Flux sources, pods). Exit 0=ready, 2=progressing, 1=hard failure"
+    cmds:
+      - '{{.TASKFILE_DIR}}/../scripts/health.sh'
+
   pending:
     desc: Check MR pipeline status and show failed jobs
     dir: '{{.USER_WORKING_DIR}}'
@@ -34,3 +47,220 @@ tasks:
       - curl -LO https://repo1.dso.mil/big-bang/product/packages/gluon/-/raw/master/docs/_templates.gotmpl
       - docker run --rm -v "$(pwd):/helm-docs" -u $(id -u) jnorwood/helm-docs:v1.14.2 -s file -t /helm-docs/README.md.gotmpl -t /helm-docs/_templates.gotmpl --dry-run > README.md
       - rm -f .helmdocsignore README.md.gotmpl _templates.gotmpl
+
+  check-changes:
+    desc: Detect which BigBang packages have changes and output a values.yaml enabling them
+    dir: '{{.USER_WORKING_DIR}}'
+    vars:
+      TARGET_BRANCH: '{{.TARGET_BRANCH | default "master"}}'
+      VALUES_FILE: '{{.VALUES_FILE | default "chart/values.yaml"}}'
+      MAPPING_FILE: '{{.MAPPING_FILE | default "tests/package-mapping.yaml"}}'
+      OUTPUT_FILE: '{{.OUTPUT_FILE | default "changed-packages-values.yaml"}}'
+    cmds:
+      - |
+        set -e
+        TARGET_BRANCH="{{.TARGET_BRANCH}}"
+        VALUES_FILE="{{.VALUES_FILE}}"
+        MAPPING_FILE="{{.MAPPING_FILE}}"
+        OUTPUT_FILE="{{.OUTPUT_FILE}}"
+
+        if [ ! -f "$MAPPING_FILE" ]; then
+          echo "Error: Package mapping file not found: $MAPPING_FILE" >&2
+          echo "Template changes cannot be mapped to values keys without it." >&2
+          exit 1
+        fi
+
+        # Get current branch
+        CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+        echo "Comparing $CURRENT_BRANCH to $TARGET_BRANCH"
+
+        # Create temp directories
+        TMPDIR=$(mktemp -d)
+        trap "rm -rf $TMPDIR" EXIT
+        mkdir -p "$TMPDIR/target/values" "$TMPDIR/source/values"
+        mkdir -p "$TMPDIR/target/templates" "$TMPDIR/source/templates"
+
+        # Get all packages from values file
+        PACKAGES=($(yq e '(.[],.addons.[]) | select(. | ((has("git") or has("helmRepo")) and .status != "alpha" and .status != "deprecated")) | path | .[-1]' "$VALUES_FILE"))
+
+        # Build associative array of package paths
+        declare -A package_path
+        for package in "${PACKAGES[@]}"; do
+          package_path[$package]=$(yq e ".. | (select(has(\"git\")) or (select(has(\"helmRepo\")))) | (path | join(\".\")) | select(. == \"*${package}\")" "$VALUES_FILE")
+        done
+
+        # Get templates directories
+        TEMPLATES=($(find chart/templates -type d 2>/dev/null | cut -b 17- | grep -v '^$' || true))
+
+        # Extract source branch values and templates (current state)
+        cp -R chart/templates/* "$TMPDIR/source/templates" 2>/dev/null || true
+        for package in "${PACKAGES[@]}"; do
+          yq e ".${package_path[$package]}" "$VALUES_FILE" > "$TMPDIR/source/values/$package.yaml"
+        done
+
+        # Extract target branch values and templates
+        git show "$TARGET_BRANCH:$VALUES_FILE" > "$TMPDIR/target-values.yaml" 2>/dev/null || { echo "Error: Cannot read $VALUES_FILE from $TARGET_BRANCH"; exit 1; }
+        for package in "${PACKAGES[@]}"; do
+          yq e ".${package_path[$package]}" "$TMPDIR/target-values.yaml" > "$TMPDIR/target/values/$package.yaml" 2>/dev/null || echo "" > "$TMPDIR/target/values/$package.yaml"
+        done
+
+        # Extract target templates using git archive
+        git archive "$TARGET_BRANCH" chart/templates 2>/dev/null | tar -xf - -C "$TMPDIR/target" --strip-components=1 2>/dev/null || true
+
+        # Check for changes and collect package paths
+        declare -A CHANGED_PATHS
+
+        # Check values changes
+        for package in "${PACKAGES[@]}"; do
+          if ! diff -q "$TMPDIR/target/values/$package.yaml" "$TMPDIR/source/values/$package.yaml" >/dev/null 2>&1; then
+            CHANGED_PATHS["$package"]="${package_path[$package]}"
+          fi
+        done
+
+        # Check template changes
+        for template in "${TEMPLATES[@]}"; do
+          if [ -d "$TMPDIR/source/templates/$template" ] && [ -d "$TMPDIR/target/templates/$template" ]; then
+            if ! diff -rq "$TMPDIR/target/templates/$template" "$TMPDIR/source/templates/$template" >/dev/null 2>&1; then
+              valuesKey=$(yq e ".[] | select(.filePath == \"${template}\") | key" "$MAPPING_FILE" 2>/dev/null || echo "")
+              if [ -z "$valuesKey" ] || [ "$valuesKey" == "null" ]; then
+                valuesKey="$template"
+              fi
+              if [ -z "${CHANGED_PATHS[$valuesKey]:-}" ]; then
+                pkg_path=$(yq e ".. | (select(has(\"git\")) or (select(has(\"helmRepo\")))) | (path | join(\".\")) | select(. == \"*${valuesKey}\")" "$VALUES_FILE" 2>/dev/null || echo "")
+                if [ -n "$pkg_path" ]; then
+                  CHANGED_PATHS["$valuesKey"]="$pkg_path"
+                fi
+              fi
+            fi
+          elif [ -d "$TMPDIR/source/templates/$template" ] || [ -d "$TMPDIR/target/templates/$template" ]; then
+            valuesKey=$(yq e ".[] | select(.filePath == \"${template}\") | key" "$MAPPING_FILE" 2>/dev/null || echo "")
+            if [ -z "$valuesKey" ] || [ "$valuesKey" == "null" ]; then
+              valuesKey="$template"
+            fi
+            if [ -z "${CHANGED_PATHS[$valuesKey]:-}" ]; then
+              pkg_path=$(yq e ".. | (select(has(\"git\")) or (select(has(\"helmRepo\")))) | (path | join(\".\")) | select(. == \"*${valuesKey}\")" "$VALUES_FILE" 2>/dev/null || echo "")
+              if [ -n "$pkg_path" ]; then
+                CHANGED_PATHS["$valuesKey"]="$pkg_path"
+              fi
+            fi
+          fi
+        done
+
+        # Expand dependencies from the mapping file (mirrors the pipeline's label_check)
+        declare -A IS_DEPENDENCY
+        QUEUE=("${!CHANGED_PATHS[@]}")
+        while [ ${#QUEUE[@]} -gt 0 ]; do
+          current="${QUEUE[0]}"
+          QUEUE=("${QUEUE[@]:1}")
+          deps=$(yq e ".[\"${current}\"].dependencies[]" "$MAPPING_FILE" 2>/dev/null || echo "")
+          if [ -z "$deps" ] || [ "$deps" == "null" ]; then
+            continue
+          fi
+          while IFS= read -r dep; do
+            if [ -z "$dep" ] || [ "$dep" == "null" ]; then
+              continue
+            fi
+            if [ -z "${CHANGED_PATHS[$dep]:-}" ]; then
+              dep_path=$(yq e ".. | (select(has(\"git\")) or (select(has(\"helmRepo\")))) | (path | join(\".\")) | select(. == \"*${dep}\")" "$VALUES_FILE" 2>/dev/null || echo "")
+              if [ -n "$dep_path" ]; then
+                CHANGED_PATHS["$dep"]="$dep_path"
+                IS_DEPENDENCY["$dep"]=1
+                QUEUE+=("$dep")
+              fi
+            fi
+          done <<< "$deps"
+        done
+
+        # Generate values.yaml with enabled packages
+        if [ ${#CHANGED_PATHS[@]} -eq 0 ]; then
+          echo "# No changes detected in any packages" > "$OUTPUT_FILE"
+          echo "No changes detected in any packages"
+        else
+          # Start with empty YAML and build up using yq
+          echo "{}" > "$OUTPUT_FILE"
+          for package in "${!CHANGED_PATHS[@]}"; do
+            pkg_path="${CHANGED_PATHS[$package]}"
+            yq -i ".${pkg_path}.enabled = true" "$OUTPUT_FILE"
+          done
+
+          echo "Changed packages:"
+          for package in "${!CHANGED_PATHS[@]}"; do
+            if [ -n "${IS_DEPENDENCY[$package]:-}" ]; then
+              echo "  - $package (${CHANGED_PATHS[$package]}) [dependency]"
+            else
+              echo "  - $package (${CHANGED_PATHS[$package]})"
+            fi
+          done
+          echo ""
+          echo "Generated $OUTPUT_FILE:"
+          cat "$OUTPUT_FILE"
+        fi
+
+  enable-from-mr:
+    desc: Pull CI_DEPLOY_LABELS from the MR's pre-vars job and output a values.yaml enabling those packages
+    dir: '{{.USER_WORKING_DIR}}'
+    vars:
+      PROJECT: '{{.PROJECT | default "big-bang/bigbang"}}'
+      VALUES_FILE: '{{.VALUES_FILE | default "chart/values.yaml"}}'
+      OUTPUT_FILE: '{{.OUTPUT_FILE | default "changed-packages-values.yaml"}}'
+      MR: '{{.MR | default ""}}'
+    cmds:
+      - |
+        set -e
+        PROJECT="{{.PROJECT}}"
+        VALUES_FILE="{{.VALUES_FILE}}"
+        OUTPUT_FILE="{{.OUTPUT_FILE}}"
+        MR="{{.MR}}"
+        PROJECT_ENC=$(printf '%s' "$PROJECT" | sed 's#/#%2F#g')
+
+        # Resolve MR IID from the current branch when not passed explicitly
+        if [ -z "$MR" ]; then
+          BRANCH=$(git rev-parse --abbrev-ref HEAD)
+          MR=$(glab api "projects/$PROJECT_ENC/merge_requests?source_branch=$BRANCH&state=opened" | yq -p json '.[0].iid')
+          if [ -z "$MR" ] || [ "$MR" == "null" ]; then
+            echo "Error: no open MR found for branch $BRANCH" >&2; exit 1
+          fi
+        fi
+        echo "Using MR !$MR"
+
+        # Latest pipeline for the MR
+        PID=$(glab api "projects/$PROJECT_ENC/merge_requests/$MR/pipelines" | yq -p json '.[0].id')
+        if [ -z "$PID" ] || [ "$PID" == "null" ]; then
+          echo "Error: no pipeline found for MR !$MR" >&2; exit 1
+        fi
+
+        # Find the 'pre vars' job in that pipeline
+        JID=$(glab api "projects/$PROJECT_ENC/pipelines/$PID/jobs?per_page=100" | yq -p json '[.[] | select(.name == "pre vars")] | .[0].id')
+        if [ -z "$JID" ] || [ "$JID" == "null" ]; then
+          echo "Error: no 'pre vars' job in pipeline $PID" >&2; exit 1
+        fi
+        echo "Pipeline $PID, pre-vars job $JID"
+
+        # CI_DEPLOY_LABELS lives in the job's dotenv artifact, which GitLab does not
+        # serve as a downloadable file, so read it from the job trace instead.
+        LABELS=$(glab api "projects/$PROJECT_ENC/jobs/$JID/trace" \
+          | sed -n 's/.*Labels after check: //p' | tail -1 \
+          | sed 's/\x1b\[[0-9;]*m//g' | tr -d '\r')
+        if [ -z "$LABELS" ]; then
+          echo "Error: could not find 'Labels after check:' in job $JID trace" >&2; exit 1
+        fi
+        echo "Deploy labels: $LABELS"
+
+        # Enable each label that resolves to a package in values.yaml (mirrors the
+        # pipeline's enable(): non-package labels like status:: or unresolved
+        # kebab names are skipped).
+        echo "{}" > "$OUTPUT_FILE"
+        ENABLED=()
+        for label in $LABELS; do
+          pkg_path=$(yq e ".. | (select(has(\"git\")) or (select(has(\"helmRepo\")))) | (path | join(\".\")) | select(. == \"*${label}\")" "$VALUES_FILE" 2>/dev/null | head -1 || echo "")
+          if [ -n "$pkg_path" ]; then
+            yq -i ".${pkg_path}.enabled = true" "$OUTPUT_FILE"
+            ENABLED+=("$label ($pkg_path)")
+          fi
+        done
+
+        echo "Enabled packages:"
+        for e in "${ENABLED[@]}"; do echo "  - $e"; done
+        echo ""
+        echo "Generated $OUTPUT_FILE:"
+        cat "$OUTPUT_FILE"

@@ -124,30 +124,62 @@ echo "$FAILED_JOBS" | jq -s '.' | jq -c '.[]' | while read -r job; do
     TRACE=$(glab api "projects/${PROJECT_ENCODED}/jobs/${JOB_ID}/trace" 2>/dev/null || echo "")
 
     if [[ -n "$TRACE" ]]; then
-        # Look for common error patterns and extract the reason
-        # Strip ANSI codes for cleaner parsing
+        # Strip ANSI codes and clean up timestamps for parsing
         CLEAN_TRACE=$(echo "$TRACE" | sed 's/\x1b\[[0-9;]*m//g')
 
-        # Extract FATAL errors (common in BB CI)
+        # Look for ERROR lines and capture context around them
+        ERROR_CONTEXT=$(echo "$CLEAN_TRACE" | grep -B2 -A5 '\[ERROR\]' | head -20 || true)
+
+        # Look for helm errors (schema validation, install failures)
+        HELM_ERRORS=$(echo "$CLEAN_TRACE" | grep -E "^Error:|values don't meet|not allowed|schema|helm.*failed" | head -10 || true)
+
+        # Extract FATAL errors
         FATAL_ERRORS=$(echo "$CLEAN_TRACE" | grep -i '\[FATAL\]' | head -5 || true)
 
-        # Extract generic error/failure lines if no FATAL found
-        if [[ -z "$FATAL_ERRORS" ]]; then
-            FATAL_ERRORS=$(echo "$CLEAN_TRACE" | grep -iE '(error|failed|failure):' | tail -5 || true)
+        # Kyverno policy failures
+        KYVERNO_ERRORS=$(echo "$CLEAN_TRACE" | grep -E 'policy.*fail|validation error.*rule' | sort -u | head -5 || true)
+
+        # Pod/container issues
+        POD_ERRORS=$(echo "$CLEAN_TRACE" | grep -iE '(CrashLoopBackOff|ImagePullBackOff|ErrImagePull|OOMKilled)' | sort -u | head -3 || true)
+
+        # Test/assertion failures
+        TEST_ERRORS=$(echo "$CLEAN_TRACE" | grep -iE '(AssertionError|FAILED.*test|expected.*got)' | head -5 || true)
+
+        # Build output - prioritize most useful info
+        OUTPUT=""
+
+        if [[ -n "$ERROR_CONTEXT" ]]; then
+            OUTPUT+="$ERROR_CONTEXT"$'\n\n'
         fi
 
-        # Extract assertion failures (for test jobs)
-        if [[ -z "$FATAL_ERRORS" ]]; then
-            FATAL_ERRORS=$(echo "$CLEAN_TRACE" | grep -iE '(AssertionError|assert|expected|actual)' | head -5 || true)
+        if [[ -n "$HELM_ERRORS" ]]; then
+            OUTPUT+="Helm errors:"$'\n'"$HELM_ERRORS"$'\n\n'
         fi
 
-        if [[ -n "$FATAL_ERRORS" ]]; then
+        if [[ -n "$KYVERNO_ERRORS" ]]; then
+            OUTPUT+="Kyverno policy errors:"$'\n'"$KYVERNO_ERRORS"$'\n\n'
+        fi
+
+        if [[ -n "$POD_ERRORS" ]]; then
+            OUTPUT+="Pod errors:"$'\n'"$POD_ERRORS"$'\n\n'
+        fi
+
+        if [[ -n "$TEST_ERRORS" ]]; then
+            OUTPUT+="Test failures:"$'\n'"$TEST_ERRORS"$'\n\n'
+        fi
+
+        # Add FATAL if not already shown in ERROR_CONTEXT
+        if [[ -n "$FATAL_ERRORS" && ! "$OUTPUT" =~ "FATAL" ]]; then
+            OUTPUT+="$FATAL_ERRORS"$'\n'
+        fi
+
+        if [[ -n "$OUTPUT" ]]; then
             echo "Reason:"
-            echo "$FATAL_ERRORS" | sed 's/^/  /'
+            echo "$OUTPUT" | sed 's/^/  /'
         else
-            # Fallback: show last 10 non-empty lines before the error
+            # Fallback: show last 15 non-empty lines
             echo "Reason (last lines of output):"
-            echo "$CLEAN_TRACE" | grep -v '^$' | tail -10 | sed 's/^/  /'
+            echo "$CLEAN_TRACE" | grep -v '^$' | grep -v 'section_' | tail -15 | sed 's/^/  /'
         fi
     else
         echo "Reason: Could not retrieve job trace"
