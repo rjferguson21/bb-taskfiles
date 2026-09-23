@@ -20,7 +20,7 @@ tasks:
       - cat {{.LOCAL_TMP}}/bootstrap.yaml | yq e 'select(.kind == "Simple")' > {{.LOCAL_TMP}}/k3d.yaml
       - cat {{.LOCAL_TMP}}/bootstrap.yaml | yq e 'select(.kind == "ConfigMap" and .metadata.name == "bigbang-k3d-dev-values") | .stringData["values.yaml"]' > {{.LOCAL_TMP}}/dev-values.yaml
       - cat {{.LOCAL_TMP}}/bootstrap.yaml | yq e 'select(.kind == "ConfigMap" and .metadata.name == "bigbang-k3d-dev-values") | .stringData["etchost"]' > {{.LOCAL_TMP}}/etchost
-      - DOCKER_HOST={{.DOCKER_HOST}} k3d cluster delete -a && DOCKER_HOST={{.DOCKER_HOST}} k3d cluster create --config {{.LOCAL_TMP}}/k3d.yaml --image=rancher/k3s:v1.35.3-k3s1
+      - DOCKER_HOST={{.DOCKER_HOST}} k3d cluster delete -a && DOCKER_HOST={{.DOCKER_HOST}} k3d cluster create --config {{.LOCAL_TMP}}/k3d.yaml --image=rancher/k3s:v1.37.0-k3s1
       - i=0; until kubectl get deployment helm-controller >/dev/null 2>&1 || [ $i -ge 3 ]; do sleep 1; i=$((i+1)); done
 
   setuphost:
@@ -33,6 +33,19 @@ tasks:
       - "{{ .COMMAND_PREFIX }} sudo sed -i '/dev.bigbang.mil/d' /etc/hosts"
       - "cat {{.LOCAL_TMP}}/etchost | {{ .COMMAND_PREFIX }} sudo tee -a /etc/hosts"
       - touch {{.LOCAL_TMP}}/.setuphost-done
+
+  external-dependencies:
+    desc: "Start external PostgreSQL, Garage, and Valkey beside k3d and connect the cluster nodes to their network"
+    vars:
+      DEPENDENCIES_DIR: "{{.BIGBANG_DIR}}/docs/reference/scripts/developer/dependencies"
+      K3D_DEV_POSTGRES_DATABASES: '{{.K3D_DEV_POSTGRES_DATABASES | default "gitlabhq_production,mattermost,anchore"}}'
+      K3D_DEV_GARAGE_BUCKETS: '{{.K3D_DEV_GARAGE_BUCKETS | default ""}}'
+    cmds:
+      - docker ps -aq --filter 'name=bigbang-dev-' | xargs -r docker rm -f
+      - docker volume ls -q --filter 'name=bigbang-dev-' | xargs -r docker volume rm
+      - docker network inspect k3d-dependencies >/dev/null 2>&1 || docker network create --subnet 172.30.0.0/16 k3d-dependencies
+      - for container in $(docker ps --filter 'name=k3d-bb-helm-' --format '{{`{{.Names}}`}}'); do docker network connect k3d-dependencies "$container" 2>/dev/null || true; done
+      - K3D_DEV_POSTGRES_DATABASES='{{.K3D_DEV_POSTGRES_DATABASES}}' K3D_DEV_GARAGE_BUCKETS='{{.K3D_DEV_GARAGE_BUCKETS}}' {{.DEPENDENCIES_DIR}}/manage.sh up
 
   deploy:
     desc: "Deploy a BigBang instance to the k3d cluster. Use EXTRA_ARGS for additional values (e.g., EXTRA_ARGS='--values tests/test-values-ambient.yaml')"

@@ -65,6 +65,7 @@ tasks:
       - task: k3d-create
         vars:
           BASE_MOUNT_DIR: "{{ .LOCAL_TMP }}"
+      - task: external-dependencies
       - task: deploy
         vars:
           DISABLE_CORE: "{{.DISABLE_CORE}}"
@@ -142,40 +143,37 @@ tasks:
           EXTRA_VALUES: "{{.EXTRA_VALUES}}"
 
   package:deploy:
-    desc: Deploy BigBang with the current package branch from CWD
+    desc: Deploy BigBang with the current package branch from CWD. Use TEST_VALUES to swap the test values file (e.g., TEST_VALUES=tests/test-sso-values.yaml)
     dir: '{{.USER_WORKING_DIR}}'
     vars:
       BIGBANG_DIR: /home/rob/bb/bigbang
+      TEST_VALUES: '{{.TEST_VALUES | default "tests/test-values.yaml"}}'
     cmds:
       - task: deploy
         vars:
           DISABLE_CORE: "{{.DISABLE_CORE}}"
           BIGBANG_DIR: "{{.BIGBANG_DIR}}"
-          EXTRA_ARGS: -f tests/test-values.yaml --set={{.PACKAGE_PATH}}.git.branch=$(git rev-parse --abbrev-ref HEAD) --set={{.PACKAGE_PATH}}.git.tag=null {{ .EXTRA_VALUES }}
-
-  package:deploy:sso:
-    desc: Deploy BigBang with SSO enabled using local Keycloak
-    dir: '{{.USER_WORKING_DIR}}'
-    vars:
-      BIGBANG_DIR: /home/rob/bb/bigbang
-    cmds:
-      - task: deploy
-        vars:
-          BIGBANG_DIR: "{{.BIGBANG_DIR}}"
-          EXTRA_ARGS: -f tests/test-values.yaml --set={{.PACKAGE_PATH}}.git.branch=$(git rev-parse --abbrev-ref HEAD) --set={{.PACKAGE_PATH}}.git.tag=null -f docs/dev-overrides/minimal.yaml -f docs/dev-overrides/kiali-testing-local-keycloak.yaml
+          EXTRA_ARGS: -f {{.TEST_VALUES}} --set={{.PACKAGE_PATH}}.git.branch=$(git rev-parse --abbrev-ref HEAD) --set={{.PACKAGE_PATH}}.git.tag=null {{ .EXTRA_VALUES }}
 
   package:upgrade:
-    desc: Test package upgrade from released version to current branch
+    desc: Test package upgrade from released version to current branch. Use TEST_VALUES to swap the test values file (e.g., TEST_VALUES=tests/test-sso-values.yaml)
     dir: '{{.USER_WORKING_DIR}}'
     vars:
       BIGBANG_DIR: /home/rob/bb/bigbang
+      TEST_VALUES: '{{.TEST_VALUES | default "tests/test-values.yaml"}}'
     cmds:
       - task: k3d-create
       - task: deploy
         vars:
           BIGBANG_DIR: "{{.BIGBANG_DIR}}"
-          EXTRA_ARGS: -f tests/test-values.yaml
+          EXTRA_ARGS: -f {{.TEST_VALUES}}
       - task: package:deploy
+      - |
+        # deploy's HelmRelease wait can pass on the pre-upgrade revision before
+        # flux fetches the branch; force reconciliation and wait for the upgrade
+        HR=$(kubectl get helmrelease -n bigbang -o json | jq -r --arg pkg "{{.PACKAGE}}" '.items[] | select(.spec.chart.spec.chart == $pkg or .metadata.name == $pkg) | .metadata.name' | head -1)
+        flux reconcile source git {{.PACKAGE}} -n bigbang
+        flux reconcile helmrelease "${HR:-{{.PACKAGE}}}" -n bigbang
       - task: package:test
 
   package:test:unit:

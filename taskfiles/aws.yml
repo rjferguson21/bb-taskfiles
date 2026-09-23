@@ -2,16 +2,13 @@
 version: '3'
 
 vars:
-  BIGBANG_DIR: .
+  BIGBANG_DIR: /home/rob/bb/bigbang
 
 tasks:
   ec2:
     desc: Create an EC2 instance for BigBang development using k3d-dev script
-    vars:
-      DOCKER_HOST: 
-        sh: "yq .DOCKER_HOST dev.yaml"
     cmds:
-      - "{{.BIGBANG_DIR}}/docs/assets/scripts/developer/k3d-dev.sh"
+      - "{{.BIGBANG_DIR}}/docs/reference/scripts/developer/k3d-dev.sh"
       - task: ec2:ssh-config
       - task: ec2:post
     status:
@@ -21,9 +18,9 @@ tasks:
   ec2:post:
     desc: Output basic metadata about instance
     cmds:
-      - "aws ec2 describe-instances --filters \"Name=tag:Name,Values=$(aws sts get-caller-identity --query 'Arn' --output text | cut -d'/' -f3 | tr -d '@')-dev\"
+      - "aws ec2 describe-instances --filters \"Name=key-name,Values=$(aws sts get-caller-identity --query 'Arn' --output text | cut -d'/' -f3 | tr -d '@')-dev-default\"
         \"Name=instance-state-name,Values=running\"
-        --query 'Reservations[0].Instances[0]'
+        --query 'Reservations[].Instances[] | sort_by(@, &LaunchTime)[-1]'
         --output json | yq eval '{
           \"INST_ID\": .InstanceId,
           \"EC2_PUBLIC_IP\": .PublicIpAddress,
@@ -39,7 +36,7 @@ tasks:
       AWS_USERNAME: 
         sh: aws sts get-caller-identity --query 'Arn' --output text | cut -d'/' -f3 | tr -d '@'
       EC2_PUBLIC_IP:
-        sh: aws ec2 describe-instances --filters "Name=tag:Name,Values={{.AWS_USERNAME}}-dev" "Name=instance-state-name,Values=pending,running,stopping,stopped"  --query 'Reservations[*].Instances[*].[PublicIpAddress]' --output json | jq -r '.[0][0][0]'
+        sh: aws ec2 describe-instances --filters "Name=key-name,Values={{.AWS_USERNAME}}-dev-default" "Name=instance-state-name,Values=pending,running,stopping,stopped" --query 'Reservations[].Instances[] | sort_by(@, &LaunchTime)[-1].PublicIpAddress' --output text
       SSH_CONFIG: ~/.ssh/config
       HOST_ENTRY: |
         Host {{.EC2_PUBLIC_IP}}
