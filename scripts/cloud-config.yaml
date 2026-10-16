@@ -1,0 +1,38 @@
+#cloud-config
+# Instance-side setup for ec2-dev.sh: docker plus the sysctl/ulimit/kernel
+# module tuning Big Bang workloads need.
+
+package_update: true
+package_upgrade: true
+
+write_files:
+  - path: /etc/sysctl.d/99-bigbang.conf
+    content: |
+      vm.max_map_count=524288
+      fs.nr_open=13181252
+      fs.file-max=13181250
+      fs.inotify.max_user_instances=1024
+      fs.inotify.max_user_watches=1048576
+  - path: /etc/security/limits.d/ulimits.conf
+    content: |
+      * soft nofile 13181250
+      * hard nofile 13181250
+      * soft nproc  13181250
+      * hard nproc  13181250
+  - path: /etc/modules-load.d/istio-iptables.conf
+    content: |
+      br_netfilter
+      nf_nat_redirect
+      xt_REDIRECT
+      xt_owner
+      xt_statistic
+
+runcmd:
+  - sysctl --system
+  - systemctl restart systemd-modules-load.service
+  - curl -fsSL https://get.docker.com | sh
+  - usermod -aG docker ubuntu
+  - systemctl enable --now docker
+  # auto-terminate 8 hours after boot (instance-initiated-shutdown-behavior
+  # is "terminate"); disable with: ssh bb-dev 'sudo crontab -r'
+  - echo "$(date -u -d '+8 hours' +'%M %H') * * * /usr/sbin/shutdown -h now" | crontab -
