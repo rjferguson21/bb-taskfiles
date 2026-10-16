@@ -3,9 +3,8 @@ version: '3'
 
 vars:
   BIGBANG_DIR: /home/rob/bb/bigbang
-  BIGBANG_K3D_CHART: oci://ghcr.io/rjferguson21/bb-k3d:0.3.4
+  BIGBANG_K3D_CHART: oci://ghcr.io/rjferguson21/bb-k3d:0.3.6
   LOCAL_TMP: "{{.USER_WORKING_DIR}}/dev"
-  BASE_MOUNT_DIR: "{{.USER_WORKING_DIR}}/dev"
   PACKAGE:
     sh: basename -s .git "$(git -C {{.USER_WORKING_DIR}} remote get-url origin 2>/dev/null)" 2>/dev/null || echo "keycloak"
   PACKAGE_PATH:
@@ -60,11 +59,7 @@ tasks:
     desc: "Create a k3d cluster, deploy BigBang, and run tests. Use EXTRA_ARGS for additional values (e.g., EXTRA_ARGS='--values tests/test-values-ambient.yaml')"
     cmds:
       - task: setuphost
-        vars:
-          BASE_MOUNT_DIR: "{{ .LOCAL_TMP }}"
       - task: k3d-create
-        vars:
-          BASE_MOUNT_DIR: "{{ .LOCAL_TMP }}"
       - task: external-dependencies
       - task: deploy
         vars:
@@ -75,72 +70,9 @@ tasks:
     desc: Create a k3d cluster and deploy a BigBang package
     cmds:
       - task: k3d-create
+      - task: external-dependencies
       - task: package:deploy
       - task: package:test
-
-  package:remove:
-    desc: Remove package HelmRelease and Helm release from the cluster
-    dir: '{{.USER_WORKING_DIR}}'
-    vars:
-      HELMRELEASE_NAME:
-        sh: kubectl get helmrelease -n bigbang -o json 2>/dev/null | jq -r --arg pkg "{{.PACKAGE}}" '.items[] | select(.spec.chart.spec.chart == $pkg or .metadata.name == $pkg) | .metadata.name' | head -1
-      RELEASE_NAME:
-        sh: helm list -n bigbang -o json | jq -r --arg pkg "{{.PACKAGE}}" '[.[] | select(.chart | startswith($pkg + "-"))] | .[0].name // empty'
-    cmds:
-      - |
-        if [ -z "{{.HELMRELEASE_NAME}}" ]; then
-          echo "Warning: No HelmRelease found for {{.PACKAGE}}"
-        else
-          echo "Found HelmRelease: {{.HELMRELEASE_NAME}}"
-          flux suspend helmrelease {{.HELMRELEASE_NAME}} -n bigbang || true
-        fi
-      - |
-        # Remove finalizers from all resources in the namespace first to allow clean deletion
-        if kubectl get ns {{.PACKAGE_NAMESPACE}} >/dev/null 2>&1; then
-          echo "Removing finalizers from resources in {{.PACKAGE_NAMESPACE}}"
-          for resource in $(kubectl api-resources --verbs=list --namespaced -o name 2>/dev/null); do
-            kubectl get "$resource" -n {{.PACKAGE_NAMESPACE}} -o json 2>/dev/null | \
-              jq -r '.items[] | select(.metadata.finalizers != null) | "\(.kind)/\(.metadata.name)"' | \
-              while read -r item; do
-                [ -n "$item" ] && echo "  Removing finalizer from $item" && \
-                kubectl patch "$item" -n {{.PACKAGE_NAMESPACE}} --type=merge -p '{"metadata":{"finalizers":[]}}' 2>/dev/null || true
-              done
-          done
-        fi
-      - |
-        if [ -z "{{.RELEASE_NAME}}" ]; then
-          echo "Warning: No Helm release found for {{.PACKAGE}}"
-        else
-          echo "Found Helm release: {{.RELEASE_NAME}}"
-          helm uninstall {{.RELEASE_NAME}} -n bigbang || true
-        fi
-      - |
-        if [ -n "{{.HELMRELEASE_NAME}}" ]; then
-          kubectl delete helmrelease {{.HELMRELEASE_NAME}} -n bigbang --ignore-not-found
-        fi
-      - |
-        # Delete Flux GitRepository source for this package
-        kubectl delete gitrepository {{.PACKAGE}} -n bigbang --ignore-not-found 2>/dev/null && \
-          echo "Deleted GitRepository: {{.PACKAGE}}" || true
-      - |
-        # Delete the namespace
-        if kubectl get ns {{.PACKAGE_NAMESPACE}} >/dev/null 2>&1; then
-          echo "Deleting namespace: {{.PACKAGE_NAMESPACE}}"
-          kubectl delete ns {{.PACKAGE_NAMESPACE}} --ignore-not-found --timeout=60s
-        fi
-
-  package:redeploy:
-    desc: Uninstall package release and redeploy from current branch
-    dir: '{{.USER_WORKING_DIR}}'
-    vars:
-      BIGBANG_DIR: /home/rob/bb/bigbang
-    cmds:
-      - task: package:remove
-      - task: package:deploy
-        vars:
-          DISABLE_CORE: "{{.DISABLE_CORE}}"
-          BIGBANG_DIR: "{{.BIGBANG_DIR}}"
-          EXTRA_VALUES: "{{.EXTRA_VALUES}}"
 
   package:deploy:
     desc: Deploy BigBang with the current package branch from CWD. Use TEST_VALUES to swap the test values file (e.g., TEST_VALUES=tests/test-sso-values.yaml)
@@ -185,13 +117,16 @@ tasks:
   package:test:e2e:
     desc: Run Helm e2e tests against the deployed package
     vars:
+      # re-derived here because globals in this file don't see CLI vars
+      BASE_MOUNT_DIR: '{{eq (.DOCKER_CONTEXT | default "") "bb-dev" | ternary "/home/ubuntu" .LOCAL_TMP}}'
+      COMMAND_PREFIX: '{{eq (.DOCKER_CONTEXT | default "") "bb-dev" | ternary "ssh bb-dev" ""}}'
       PACKAGE:
         sh: cat chart/Chart.yaml | yq '.name'
       RELEASE_NAME:
         sh: helm list -A -o json | jq -r '[.[] | select(.chart | startswith("{{.PACKAGE}}")) | .name] | join(" ")'
     dir: '{{.USER_WORKING_DIR}}'
     cmds:
-      - rm -fr {{.BASE_MOUNT_DIR}}/cypress/*
+      - "{{.COMMAND_PREFIX}} rm -fr {{.BASE_MOUNT_DIR}}/cypress/*"
       - for: { var: RELEASE_NAME }
         cmd: helm test {{.ITEM}} -n bigbang
 
